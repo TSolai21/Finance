@@ -70,7 +70,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
       const [custRes, loanRes] = await Promise.all([
         supabase
           .from('customers')
-          .select('id, client_id, full_name, mobile_number')
+          .select('id, client_id, full_name, mobile_number, photo_url, status')
           .or(`full_name.ilike.%${q}%,client_id.ilike.%${q}%,mobile_number.ilike.%${q}%`)
           .limit(5),
         supabase
@@ -190,10 +190,24 @@ export function Layout({ children }: { children: React.ReactNode }) {
                               router.push(`/customers/${c.id}`)
                               setSearchQuery('')
                             }}
-                            className="px-3 py-2.5 hover:bg-indigo-50/70 active:bg-indigo-100 rounded-xl cursor-pointer flex justify-between items-center transition-colors active-press"
+                            className="px-3 py-2 hover:bg-indigo-50/70 active:bg-indigo-100 rounded-xl cursor-pointer flex justify-between items-center transition-colors active-press"
                           >
-                            <span className="font-semibold text-slate-800 text-xs md:text-sm">{c.full_name}</span>
-                            <span className="text-xs font-mono font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100">{c.client_id}</span>
+                            <div className="flex items-center space-x-2.5 min-w-0">
+                              {c.photo_url ? (
+                                <img src={c.photo_url} alt={c.full_name} className="w-8 h-8 rounded-full object-cover border border-indigo-200 shrink-0" />
+                              ) : (
+                                <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 font-bold flex items-center justify-center text-xs shrink-0">
+                                  {c.full_name?.charAt(0) || 'C'}
+                                </div>
+                              )}
+                              <div className="truncate">
+                                <span className="font-semibold text-slate-800 text-xs md:text-sm block truncate">{c.full_name}</span>
+                                <span className="text-[10px] text-slate-400 font-mono">{c.mobile_number}</span>
+                              </div>
+                            </div>
+                            <span className="text-xs font-mono font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100 shrink-0 ml-2">
+                              {c.client_id}
+                            </span>
                           </div>
                         ))
                       ) : (

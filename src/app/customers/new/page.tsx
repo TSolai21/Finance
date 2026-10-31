@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { Save, Camera, UploadCloud, MapPin as MapPinIcon, Check, User, Phone, Home, Shield, AlertCircle, X } from 'lucide-react'
+import { Save, Camera, MapPin as MapPinIcon, Check, User, Phone, Home, Shield, AlertCircle, X } from 'lucide-react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import Select from 'react-select'
 import { supabase } from '@/lib/supabase'
@@ -13,6 +13,14 @@ const GENDER_OPTIONS = [
   { value: 'Female', label: 'Female' },
   { value: 'Male', label: 'Male' },
   { value: 'Other', label: 'Other' }
+]
+
+const KYC_DOC_OPTIONS = [
+  { value: 'Aadhaar (UID)', label: 'Aadhaar Card (12-Digit UID)' },
+  { value: 'Voter ID', label: 'Voter ID (EPIC)' },
+  { value: 'PAN Card', label: 'PAN Card' },
+  { value: 'Ration Card', label: 'Ration Card' },
+  { value: 'Driving License', label: 'Driving License' }
 ]
 
 const NOMINEE_RELATIONSHIP_OPTIONS = [
@@ -26,12 +34,25 @@ const NOMINEE_RELATIONSHIP_OPTIONS = [
   { value: 'Other', label: 'Other' }
 ]
 
+function calculateAge(dobStr: string): number {
+  if (!dobStr) return 0
+  const birth = new Date(dobStr)
+  const today = new Date()
+  let age = today.getFullYear() - birth.getFullYear()
+  const m = today.getMonth() - birth.getMonth()
+  if (m < 0 || (m === 0 && today.getDate() < birth.getDate())) {
+    age--
+  }
+  return age
+}
+
 export default function CustomerForm() {
   const router = useRouter()
   const queryClient = useQueryClient()
   
   // Permanent Client ID state
   const [clientId, setClientId] = useState<string>('Generating...')
+  const [formError, setFormError] = useState<string | null>(null)
   
   // Form State
   const [formData, setFormData] = useState({
@@ -40,8 +61,11 @@ export default function CustomerForm() {
     dob: '',
     gender: 'Female',
     address: '',
+    kycDocType: 'Aadhaar (UID)',
+    kycDocNumber: '',
     nomineeName: '',
     nomineeRelationship: 'Husband',
+    nomineeDob: '',
     nomineeMobile: '',
     nomineeAddress: '',
     centerId: ''
@@ -50,10 +74,8 @@ export default function CustomerForm() {
   const [gpsLocation, setGpsLocation] = useState('')
   const [gpsLoading, setGpsLoading] = useState(false)
   const [gpsError, setGpsError] = useState('')
-  const [customerPhoto, setCustomerPhoto] = useState<File | null>(null)
-  const [photoPreview, setPhotoPreview] = useState<string | null>(null)
-  const [kycDoc, setKycDoc] = useState<File | null>(null)
-  const [docPreview, setDocPreview] = useState<string | null>(null)
+  const [customerPhotoUrl, setCustomerPhotoUrl] = useState('')
+  const [kycDocUrl, setKycDocUrl] = useState('')
 
   // Fetch sequential Client ID on mount
   useEffect(() => {
@@ -69,23 +91,6 @@ export default function CustomerForm() {
     }
   })
 
-  // Handle Photo Selection
-  const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) {
-      setCustomerPhoto(file)
-      setPhotoPreview(URL.createObjectURL(file))
-    }
-  }
-
-  // Handle KYC Doc Selection
-  const handleDocChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) {
-      setKycDoc(file)
-      setDocPreview(file.name)
-    }
-  }
 
   // Real HTML5 GPS Geolocation
   const handleCaptureGPS = () => {
@@ -117,23 +122,108 @@ export default function CustomerForm() {
   // Mutation to insert customer
   const createCustomer = useMutation({
     mutationFn: async (data: typeof formData) => {
-      // In production we upload to Supabase Storage:
-      // Here we record photo/doc path metadata
-      const photoPath = customerPhoto ? `photos/${clientId}_${customerPhoto.name}` : null
-      const docPath = kycDoc ? `docs/${clientId}_${kycDoc.name}` : null
+      setFormError(null)
+
+      // 1. Client Age Validation (Max 60 years, Min 18 years)
+      if (data.dob) {
+        const clientAge = calculateAge(data.dob)
+        if (clientAge < 18) {
+          throw new Error('Client must be at least 18 years old.')
+        }
+        if (clientAge > 60) {
+          throw new Error(`Client age is ${clientAge} years. Client age must not exceed 60 years as per policy.`)
+        }
+      }
+
+      // 2. Nominee Age Validation (Max 65 years, Min 18 years)
+      if (data.nomineeDob) {
+        const nomineeAge = calculateAge(data.nomineeDob)
+        if (nomineeAge < 18) {
+          throw new Error('Nominee must be at least 18 years old.')
+        }
+        if (nomineeAge > 65) {
+          throw new Error(`Nominee age is ${nomineeAge} years. Nominee age must not exceed 65 years as per policy.`)
+        }
+      }
+
+      // 3. UID / Aadhaar Mandatory & Duplicate Check (1 UID = 1 Permanent Client Number)
+      const cleanUid = data.kycDocNumber.trim()
+      if (!cleanUid) {
+        throw new Error('Customer UID / Aadhaar number is mandatory.')
+      }
+
+      const { data: duplicateUid } = await supabase
+        .from('customers')
+        .select('id, client_id, full_name')
+        .eq('kyc_doc_number', cleanUid)
+        .maybeSingle()
+
+      if (duplicateUid) {
+        throw new Error(
+          `Duplicate UID blocked! UID "${cleanUid}" is already mapped to permanent Client ID ${duplicateUid.client_id} (${duplicateUid.full_name}). Each UID must map to only one permanent Client Number.`
+        )
+      }
+
+      // 4. Mobile Number Deduplication Check
+      const cleanClientMobile = data.mobileNumber.trim().replace(/\D/g, '')
+      const cleanNomineeMobile = data.nomineeMobile?.trim().replace(/\D/g, '')
+
+      if (cleanClientMobile.length !== 10) {
+        throw new Error('Client mobile number must be exactly 10 digits.')
+      }
+
+      // Check if client mobile number is already used by another customer or nominee
+      const { data: existingClientMobile } = await supabase
+        .from('customers')
+        .select('id, client_id, full_name, mobile_number, nominee_mobile')
+        .or(`mobile_number.eq.${cleanClientMobile},nominee_mobile.eq.${cleanClientMobile}`)
+        .limit(1)
+
+      if (existingClientMobile && existingClientMobile.length > 0) {
+        throw new Error(
+          `Duplicate Mobile blocked! Mobile number ${cleanClientMobile} is already in use by customer ${existingClientMobile[0].full_name} (${existingClientMobile[0].client_id}). A mobile number cannot be shared across different customers.`
+        )
+      }
+
+      // Check if nominee mobile number is already used by another customer or nominee (unless it equals this customer's mobile)
+      if (cleanNomineeMobile && cleanNomineeMobile !== cleanClientMobile) {
+        if (cleanNomineeMobile.length !== 10) {
+          throw new Error('Nominee mobile number must be exactly 10 digits.')
+        }
+
+        const { data: existingNomineeMobile } = await supabase
+          .from('customers')
+          .select('id, client_id, full_name, mobile_number, nominee_mobile')
+          .or(`mobile_number.eq.${cleanNomineeMobile},nominee_mobile.eq.${cleanNomineeMobile}`)
+          .limit(1)
+
+        if (existingNomineeMobile && existingNomineeMobile.length > 0) {
+          throw new Error(
+            `Duplicate Nominee Mobile blocked! Nominee mobile ${cleanNomineeMobile} is already in use by customer ${existingNomineeMobile[0].full_name} (${existingNomineeMobile[0].client_id}).`
+          )
+        }
+      }
+
+      // Client photo & KYC document links (URL inputs directly to prevent database/storage bloat)
+      const photoPath = customerPhotoUrl.trim() || null
+      const docPath = kycDocUrl.trim() || null
 
       const { data: result, error } = await supabase
         .from('customers')
         .insert({
           client_id: clientId,
           full_name: data.fullName,
-          mobile_number: data.mobileNumber,
+          mobile_number: cleanClientMobile,
           dob: data.dob || null,
           gender: data.gender,
           address: data.address,
+          kyc_doc_type: data.kycDocType,
+          kyc_doc_number: cleanUid,
           nominee_name: data.nomineeName || null,
           nominee_relationship: data.nomineeRelationship || null,
-          nominee_mobile: data.nomineeMobile || null,
+          nominee_dob: data.nomineeDob || null,
+          nominee_mobile: cleanNomineeMobile || null,
+          nominee_address: data.nomineeAddress || null,
           center_id: data.centerId || null,
           photo_url: photoPath,
           kyc_doc_url: docPath,
@@ -152,7 +242,7 @@ export default function CustomerForm() {
     },
     onError: (error: any) => {
       console.error('Error creating customer:', error)
-      alert(`Failed to save customer: ${error.message || 'Database error'}`)
+      setFormError(error.message || 'Database error while saving customer.')
     }
   })
 
@@ -162,8 +252,9 @@ export default function CustomerForm() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    setFormError(null)
     if (!formData.centerId) {
-      alert('Please select a Center for the customer.')
+      setFormError('Please select a Center for the customer.')
       return
     }
     createCustomer.mutate(formData)
@@ -192,11 +283,22 @@ export default function CustomerForm() {
           </div>
 
       <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Form Error Banner */}
+        {formError && (
+          <div className="bg-rose-50 border-2 border-rose-300 text-rose-800 p-4 rounded-xl flex items-start space-x-3 text-xs font-semibold animate-in fade-in duration-200">
+            <AlertCircle size={18} className="text-rose-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold text-sm text-rose-900 mb-0.5">Validation Alert</p>
+              <p>{formError}</p>
+            </div>
+          </div>
+        )}
+
         {/* Section 1: Customer Profile */}
         <section className="bg-white p-6 rounded-xl border border-slate-200 shadow-xs">
           <div className="flex items-center space-x-2 text-slate-800 font-semibold text-base mb-4 border-b border-slate-100 pb-2">
             <User size={18} className="text-indigo-600" />
-            <span>Customer Profile</span>
+            <span>Customer Profile & KYC Identification</span>
           </div>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -214,23 +316,34 @@ export default function CustomerForm() {
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Mobile Number *</label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Mobile Number * (10 Digits)</label>
               <input
                 type="tel"
                 name="mobileNumber"
                 required
+                maxLength={10}
                 value={formData.mobileNumber}
                 onChange={handleChange}
                 placeholder="e.g. 9876543210"
-                className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600"
+                className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 font-mono"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Date of Birth</label>
+              <div className="flex justify-between items-center mb-1">
+                <label className="block text-xs font-semibold text-slate-700">Client Date of Birth *</label>
+                {formData.dob && (
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                    calculateAge(formData.dob) > 60 || calculateAge(formData.dob) < 18 ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'
+                  }`}>
+                    Age: {calculateAge(formData.dob)} yrs {calculateAge(formData.dob) > 60 ? '(Max 60)' : calculateAge(formData.dob) < 18 ? '(Min 18)' : '✓ Valid'}
+                  </span>
+                )}
+              </div>
               <input
                 type="date"
                 name="dob"
+                required
                 value={formData.dob}
                 onChange={handleChange}
                 className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600"
@@ -245,6 +358,32 @@ export default function CustomerForm() {
                 onChange={(opt) => setFormData(prev => ({ ...prev, gender: opt?.value || 'Female' }))}
                 styles={customSelectStyles}
                 isSearchable={false}
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">KYC Document Type *</label>
+              <Select
+                value={KYC_DOC_OPTIONS.find(opt => opt.value === formData.kycDocType)}
+                options={KYC_DOC_OPTIONS}
+                onChange={(opt) => setFormData(prev => ({ ...prev, kycDocType: opt?.value || 'Aadhaar (UID)' }))}
+                styles={customSelectStyles}
+                isSearchable={false}
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                UID / Document Number * <span className="text-[10px] text-indigo-600 font-mono">(1 UID = 1 Permanent Client)</span>
+              </label>
+              <input
+                type="text"
+                name="kycDocNumber"
+                required
+                value={formData.kycDocNumber}
+                onChange={handleChange}
+                placeholder="e.g. 1234 5678 9012"
+                className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 font-mono font-medium"
               />
             </div>
 
@@ -282,10 +421,10 @@ export default function CustomerForm() {
         <section className="bg-white p-6 rounded-xl border border-slate-200 shadow-xs">
           <div className="flex items-center space-x-2 text-slate-800 font-semibold text-base mb-4 border-b border-slate-100 pb-2">
             <Shield size={18} className="text-indigo-600" />
-            <span>Nominee Details</span>
+            <span>Nominee Details & Verification</span>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">Nominee Full Name *</label>
               <input
@@ -311,13 +450,47 @@ export default function CustomerForm() {
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Nominee Mobile</label>
+              <div className="flex justify-between items-center mb-1">
+                <label className="block text-xs font-semibold text-slate-700">Nominee Date of Birth *</label>
+                {formData.nomineeDob && (
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                    calculateAge(formData.nomineeDob) > 65 || calculateAge(formData.nomineeDob) < 18 ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'
+                  }`}>
+                    Age: {calculateAge(formData.nomineeDob)} yrs {calculateAge(formData.nomineeDob) > 65 ? '(Max 65)' : calculateAge(formData.nomineeDob) < 18 ? '(Min 18)' : '✓ Valid'}
+                  </span>
+                )}
+              </div>
+              <input
+                type="date"
+                name="nomineeDob"
+                required
+                value={formData.nomineeDob}
+                onChange={handleChange}
+                className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Nominee Mobile (10 Digits)</label>
               <input
                 type="tel"
                 name="nomineeMobile"
+                maxLength={10}
                 value={formData.nomineeMobile}
                 onChange={handleChange}
                 placeholder="e.g. 9876500000"
+                className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 font-mono"
+              />
+            </div>
+
+            <div className="md:col-span-2 lg:col-span-4">
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Nominee Address (Optional, if different)</label>
+              <input
+                type="text"
+                name="nomineeAddress"
+                value={formData.nomineeAddress}
+                onChange={handleChange}
+                placeholder="Nominee address or leave blank if same as client"
                 className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600"
               />
             </div>
@@ -326,58 +499,86 @@ export default function CustomerForm() {
 
         {/* Section 3: Evidence, Photos & Field Location */}
         <section className="bg-white p-6 rounded-xl border border-slate-200 shadow-xs">
-          <div className="flex items-center space-x-2 text-slate-800 font-semibold text-base mb-4 border-b border-slate-100 pb-2">
-            <Camera size={18} className="text-indigo-600" />
-            <span>Field Evidence & Location</span>
+          <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-4">
+            <div className="flex items-center space-x-2 text-slate-800 font-semibold text-base">
+              <Camera size={18} className="text-indigo-600" />
+              <span>Field Evidence & Location</span>
+            </div>
+            <span className="text-[11px] font-medium text-amber-700 bg-amber-50 px-2.5 py-0.5 rounded-full border border-amber-200">
+              🔗 Photo & Doc Link Mode (Uploads Disabled)
+            </span>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {/* Customer Photo */}
+            {/* Customer Photo Link */}
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5">Customer Photo</label>
-              <div className="border-2 border-dashed border-slate-300 rounded-xl p-4 flex flex-col items-center justify-center text-center hover:bg-slate-50 transition-colors cursor-pointer bg-slate-50 relative overflow-hidden group min-h-[140px]">
+              <label className="block text-xs font-semibold text-slate-700 mb-1.5">Customer Photo Link / URL</label>
+              <div className="space-y-2">
                 <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handlePhotoChange}
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                  type="url"
+                  value={customerPhotoUrl}
+                  onChange={(e) => setCustomerPhotoUrl(e.target.value)}
+                  placeholder="https://... (Google Drive or image URL)"
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 font-mono"
                 />
-                {photoPreview ? (
-                  <div className="flex flex-col items-center text-emerald-600">
-                    <img src={photoPreview} alt="Customer" className="w-16 h-16 object-cover rounded-full mb-1 border-2 border-emerald-500 shadow-xs" />
-                    <span className="text-xs font-medium truncate max-w-[180px]">{customerPhoto?.name}</span>
+                <p className="text-[10px] text-slate-500">
+                  Provide customer photo link (Drive, cloud, or direct URL). Direct uploads are blocked to prevent storage limits.
+                </p>
+                {customerPhotoUrl.trim() && (
+                  <div className="flex items-center space-x-2.5 p-2 bg-slate-50 border border-slate-200 rounded-lg">
+                    <img
+                      src={customerPhotoUrl}
+                      alt="Customer Preview"
+                      className="w-10 h-10 object-cover rounded-full border border-slate-300 shrink-0"
+                      onError={(e) => {
+                        (e.target as HTMLElement).style.display = 'none'
+                      }}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <span className="text-[11px] font-semibold text-emerald-700 block">Photo URL Linked</span>
+                      <a
+                        href={customerPhotoUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[10px] text-indigo-600 hover:underline truncate block"
+                      >
+                        {customerPhotoUrl}
+                      </a>
+                    </div>
                   </div>
-                ) : (
-                  <>
-                    <Camera size={28} className="text-slate-400 mb-1.5 group-hover:text-indigo-600 transition-colors" />
-                    <span className="text-xs font-semibold text-slate-600">Take / Upload Photo</span>
-                    <span className="text-[10px] text-slate-400 mt-0.5">Camera or Gallery</span>
-                  </>
                 )}
               </div>
             </div>
 
-            {/* KYC Document */}
+            {/* KYC Document Link */}
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5">KYC Document (Aadhaar/Voter)</label>
-              <div className="border-2 border-dashed border-slate-300 rounded-xl p-4 flex flex-col items-center justify-center text-center hover:bg-slate-50 transition-colors cursor-pointer bg-slate-50 relative overflow-hidden group min-h-[140px]">
+              <label className="block text-xs font-semibold text-slate-700 mb-1.5">KYC Document Proof Link / URL</label>
+              <div className="space-y-2">
                 <input
-                  type="file"
-                  accept="image/*,.pdf"
-                  onChange={handleDocChange}
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                  type="url"
+                  value={kycDocUrl}
+                  onChange={(e) => setKycDocUrl(e.target.value)}
+                  placeholder="https://... (Google Drive or document link)"
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 font-mono"
                 />
-                {docPreview ? (
-                  <div className="flex flex-col items-center text-indigo-600">
-                    <Check size={28} className="text-indigo-600 mb-1" />
-                    <span className="text-xs font-medium truncate max-w-[180px]">{docPreview}</span>
+                <p className="text-[10px] text-slate-500">
+                  Provide link to Aadhaar/KYC document proof on Google Drive or cloud storage.
+                </p>
+                {kycDocUrl.trim() && (
+                  <div className="flex items-center space-x-2.5 p-2 bg-slate-50 border border-slate-200 rounded-lg">
+                    <Check size={16} className="text-emerald-600 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <span className="text-[11px] font-semibold text-slate-700 block">Document URL Linked</span>
+                      <a
+                        href={kycDocUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[10px] text-indigo-600 hover:underline truncate block"
+                      >
+                        {kycDocUrl}
+                      </a>
+                    </div>
                   </div>
-                ) : (
-                  <>
-                    <UploadCloud size={28} className="text-slate-400 mb-1.5 group-hover:text-indigo-600 transition-colors" />
-                    <span className="text-xs font-semibold text-slate-600">Upload KYC Proof</span>
-                    <span className="text-[10px] text-slate-400 mt-0.5">JPG, PNG or PDF</span>
-                  </>
                 )}
               </div>
             </div>

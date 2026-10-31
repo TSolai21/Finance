@@ -62,17 +62,23 @@ export function calculateLAPDelayCharge(emiAmount: number, daysDelayed: number, 
 
 /**
  * Calculates Processing Fee:
- * Micro Finance: 3.0%
- * LAP: 2.5%
- * Monthly Interest: 2.0%
+ * - Micro Finance: 3.0% for 1st Cycle, 2.5% for Subsequent Cycles / Existing Customers
+ * - LAP: 2.5%
+ * - Monthly Interest / Bullet Payment: 0% (Client feedback: "This loan does not have a first EMI or a processing fee")
  */
-export function calculateProcessingFee(productType: ProductType, amount: number, isExistingCustomer: boolean = false): number {
+export function calculateProcessingFee(
+  productType: ProductType,
+  amount: number,
+  isExistingCustomer: boolean = false,
+  _repaymentMode?: 'Bullet' | 'Monthly Interest'
+): number {
   if (productType === 'Micro Finance') {
-    return Math.round(amount * 0.03) // 3%
+    return Math.round(amount * (isExistingCustomer ? 0.025 : 0.03))
   } else if (productType === 'LAP') {
     return Math.round(amount * 0.025) // 2.5%
   } else {
-    return Math.round(amount * 0.02) // 2%
+    // Bullet / Monthly Interest loan has 0% processing fee
+    return 0
   }
 }
 

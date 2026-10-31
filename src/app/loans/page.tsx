@@ -1,12 +1,13 @@
 "use client";
 
 import { useState, useMemo } from 'react'
-import { FileText, Plus, Search, SlidersHorizontal, Trash2, Printer, X, Edit2, Eye } from 'lucide-react'
+import { FileText, Plus, Search, SlidersHorizontal, Trash2, Printer, X, Edit2, Eye, Ban, ShieldAlert } from 'lucide-react'
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import Select from 'react-select'
 import { customSelectStyles } from '@/components/ui/SelectStyles'
 import { supabase } from '@/lib/supabase'
+import { useAppStore } from '@/store/appStore'
 import { useTable } from '@/hooks/useTable'
 import { Pagination } from '@/components/ui/Pagination'
 import { SortHeader } from '@/components/ui/SortHeader'
@@ -35,10 +36,16 @@ function formatCardDate(dateStr: string) {
 
 export default function Loans() {
   const queryClient = useQueryClient()
+  const profile = useAppStore(state => state.profile)
+  const user = useAppStore(state => state.user)
+  const isAdmin = profile?.role === 'Admin'
+
   const [searchTerm, setSearchTerm] = useState('')
   const [filterStatus, setFilterStatus] = useState<string>('ALL')
   const [showFilterModal, setShowFilterModal] = useState(false)
   const [editingLoan, setEditingLoan] = useState<any>(null)
+  const [cancelModalLoan, setCancelModalLoan] = useState<any | null>(null)
+  const [cancelReason, setCancelReason] = useState('')
   const [editFormData, setEditFormData] = useState({
     principal_amount: '',
     tenure_weeks: '',
@@ -80,7 +87,38 @@ export default function Loans() {
     onError: (err: any) => alert(`Failed to update loan: ${err.message}`)
   })
 
-  // Delete Loan Mutation
+  // Controlled Cancellation Workflow Mutation (Replaces silent deletion for audit compliance)
+  const cancelLoanMutation = useMutation({
+    mutationFn: async ({ loanId, reason }: { loanId: string; reason: string }) => {
+      const { error } = await supabase
+        .from('loans')
+        .update({
+          status: 'Cancelled',
+          closure_notes: `Cancelled by ${profile?.role || 'Manager'}: ${reason}`,
+          closed_at: new Date().toISOString()
+        })
+        .eq('id', loanId)
+      if (error) throw error
+
+      // Audit Trail
+      await supabase.from('audit_logs').insert({
+        user_id: user?.id || null,
+        action: 'CANCEL_LOAN',
+        target_table: 'loans',
+        target_id: loanId,
+        details: { reason, closed_at: new Date().toISOString() }
+      })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['loans'] })
+      setCancelModalLoan(null)
+      setCancelReason('')
+      alert('Loan account successfully cancelled and logged to audit trail.')
+    },
+    onError: (err: any) => alert(`Failed to cancel loan: ${err.message}`)
+  })
+
+  // Delete Loan Mutation (Restricted to Admin Only)
   const deleteLoanMutation = useMutation({
     mutationFn: async (loanId: string) => {
       const { error } = await supabase
@@ -98,7 +136,15 @@ export default function Loans() {
   })
 
   const handleDeleteLoan = (loan: any) => {
-    if (confirm(`Are you sure you want to delete loan ${loan.loan_id} (₹${loan.principal_amount})?`)) {
+    if (!isAdmin) {
+      alert('Permission Denied: Managers cannot delete loans. As per compliance controls, loan deletion is restricted to authorized System Admin only. Please use the Cancel/Void workflow.')
+      return
+    }
+    if (loan.status === 'Active') {
+      alert('Active loans cannot be deleted directly. Please use the controlled cancellation workflow instead.')
+      return
+    }
+    if (confirm(`Are you sure you want to permanently delete draft loan ${loan.loan_id} (₹${loan.principal_amount})?`)) {
       deleteLoanMutation.mutate(loan.id)
     }
   }
@@ -257,13 +303,24 @@ export default function Loans() {
                       >
                         <Edit2 size={17} className="stroke-[1.75]" />
                       </button>
-                      <button
-                        onClick={() => handleDeleteLoan(loan)}
-                        className="text-slate-400 hover:text-rose-600 active:scale-90 transition-transform p-1"
-                        title="Delete Loan"
-                      >
-                        <Trash2 size={17} className="stroke-[1.75]" />
-                      </button>
+                      {loan.status !== 'Cancelled' && loan.status !== 'Closed' && (
+                        <button
+                          onClick={() => setCancelModalLoan(loan)}
+                          className="text-slate-400 hover:text-amber-600 active:scale-90 transition-transform p-1"
+                          title="Cancel / Void Loan (Reversal Workflow)"
+                        >
+                          <Ban size={17} className="stroke-[1.75]" />
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button
+                          onClick={() => handleDeleteLoan(loan)}
+                          className="text-slate-400 hover:text-rose-600 active:scale-90 transition-transform p-1"
+                          title="Delete Loan (Admin Only)"
+                        >
+                          <Trash2 size={17} className="stroke-[1.75]" />
+                        </button>
+                      )}
                       <Link
                         href={`/loans/${loan.id}`}
                         className="text-slate-600 hover:text-slate-900 active:scale-90 transition-transform p-1"
@@ -322,13 +379,24 @@ export default function Loans() {
                         >
                           <Edit2 size={16} />
                         </button>
-                        <button
-                          onClick={() => handleDeleteLoan(loan)}
-                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors inline-flex items-center justify-center"
-                          title="Delete Loan"
-                        >
-                          <Trash2 size={16} />
-                        </button>
+                        {loan.status !== 'Cancelled' && loan.status !== 'Closed' && (
+                          <button
+                            onClick={() => setCancelModalLoan(loan)}
+                            className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors inline-flex items-center justify-center"
+                            title="Cancel / Void Loan (Reversal Workflow)"
+                          >
+                            <Ban size={16} />
+                          </button>
+                        )}
+                        {isAdmin && (
+                          <button
+                            onClick={() => handleDeleteLoan(loan)}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors inline-flex items-center justify-center"
+                            title="Delete Loan (Admin Only)"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -436,6 +504,63 @@ export default function Loans() {
                 className="px-5 py-2 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-all shadow-sm active:scale-95 disabled:opacity-50"
               >
                 {updateLoanMutation.isPending ? 'Saving...' : 'Save Changes'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Controlled Loan Cancellation Modal (Compliance Workflow) */}
+      {cancelModalLoan && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-5 animate-in zoom-in-95 duration-200 border border-amber-200">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center space-x-2 text-amber-700">
+                <Ban size={20} />
+                <h3 className="text-base font-bold text-slate-800">Cancel Loan Account</h3>
+              </div>
+              <button onClick={() => setCancelModalLoan(null)} className="p-1.5 rounded-full hover:bg-slate-100 text-slate-400">
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="bg-amber-50 p-3 rounded-xl border border-amber-200 text-xs text-amber-900">
+              <p className="font-bold mb-1">Controlled Cancellation Process</p>
+              <p>
+                As required by audit policy, active/approved loans cannot be silently deleted. Cancelling loan{' '}
+                <strong>{cancelModalLoan.loan_id}</strong> will freeze further demand, mark the status as Cancelled, and log your user ID to the immutable audit trail.
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Mandatory Reason for Cancellation *
+              </label>
+              <textarea
+                rows={3}
+                required
+                value={cancelReason}
+                onChange={e => setCancelReason(e.target.value)}
+                placeholder="e.g. Borrower requested withdrawal / Duplicate disbursement entered by mistake"
+                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl outline-none focus:border-amber-600"
+              />
+            </div>
+
+            <div className="flex items-center justify-end space-x-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setCancelModalLoan(null)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:bg-slate-100 transition-colors"
+              >
+                Go Back
+              </button>
+              <button
+                type="button"
+                disabled={!cancelReason.trim() || cancelLoanMutation.isPending}
+                onClick={() => cancelLoanMutation.mutate({ loanId: cancelModalLoan.id, reason: cancelReason.trim() })}
+                className="px-5 py-2 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-all shadow-sm active:scale-95 disabled:opacity-50"
+              >
+                {cancelLoanMutation.isPending ? 'Processing...' : 'Confirm Cancellation'}
               </button>
             </div>
           </div>

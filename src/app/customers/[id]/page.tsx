@@ -81,19 +81,38 @@ export default function CustomerDetails() {
           {/* Main Card */}
           <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-xs">
             <div className="flex flex-col items-center text-center pb-5 border-b border-slate-100">
-              <div className="h-20 w-20 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center mb-3 shadow-inner">
-                <User size={36} />
-              </div>
+              {customer.photo_url ? (
+                <div className="h-20 w-20 rounded-full overflow-hidden mb-3 border-2 border-indigo-500 shadow-xs">
+                  <img src={customer.photo_url} alt={customer.full_name} className="w-full h-full object-cover" />
+                </div>
+              ) : (
+                <div className="h-20 w-20 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center mb-3 shadow-inner">
+                  <User size={36} />
+                </div>
+              )}
               <h2 className="text-lg font-bold text-slate-800">{customer.full_name}</h2>
               <p className="text-xs text-slate-500 font-mono mt-0.5">Permanent ID: {customer.client_id}</p>
             </div>
 
             <div className="pt-4 space-y-3.5 text-xs">
               <div className="flex items-start">
+                <Shield size={15} className="text-slate-400 mt-0.5 mr-2.5 shrink-0" />
+                <div>
+                  <span className="text-slate-500 block text-[10px]">KYC Document & UID</span>
+                  <span className="text-slate-800 font-mono font-medium">{customer.kyc_doc_type || 'Aadhaar (UID)'}: {customer.kyc_doc_number || 'N/A'}</span>
+                  {customer.kyc_doc_url && (
+                    <a href={customer.kyc_doc_url} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline block text-[11px] mt-0.5 font-medium">
+                      📄 View Document Link ↗
+                    </a>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-start">
                 <Phone size={15} className="text-slate-400 mt-0.5 mr-2.5 shrink-0" />
                 <div>
                   <span className="text-slate-500 block text-[10px]">Mobile</span>
-                  <span className="text-slate-800 font-semibold">{customer.mobile_number}</span>
+                  <span className="text-slate-800 font-semibold font-mono">{customer.mobile_number}</span>
                 </div>
               </div>
 
@@ -157,7 +176,15 @@ export default function CustomerDetails() {
                 </div>
                 <div>
                   <span className="text-slate-400 text-[10px] block">Mobile</span>
-                  <span className="text-slate-700">{customer.nominee_mobile || 'N/A'}</span>
+                  <span className="text-slate-700 font-mono">{customer.nominee_mobile || 'N/A'}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 text-[10px] block">Date of Birth</span>
+                  <span className="text-slate-700">{customer.nominee_dob || 'N/A'}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 text-[10px] block">Address</span>
+                  <span className="text-slate-700">{customer.nominee_address || 'Same as client'}</span>
                 </div>
               </div>
             </div>

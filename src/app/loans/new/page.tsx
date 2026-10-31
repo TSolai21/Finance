@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { Save, Camera, MapPin as MapPinIcon, UploadCloud, X } from 'lucide-react'
+import { Save, MapPin as MapPinIcon, X } from 'lucide-react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import Select from 'react-select'
 import { supabase } from '@/lib/supabase'
@@ -34,6 +34,18 @@ const MEETING_DAY_OPTIONS = [
   { value: 'Sunday', label: 'Sunday' }
 ]
 
+function calculateAge(dobStr: string): number {
+  if (!dobStr) return 0
+  const birth = new Date(dobStr)
+  const today = new Date()
+  let age = today.getFullYear() - birth.getFullYear()
+  const m = today.getMonth() - birth.getMonth()
+  if (m < 0 || (m === 0 && today.getDate() < birth.getDate())) {
+    age--
+  }
+  return age
+}
+
 export default function LoanForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -43,6 +55,8 @@ export default function LoanForm() {
   const [productType, setProductType] = useState<'Micro Finance' | 'LAP' | 'Monthly Interest'>('Micro Finance')
   const [customerId, setCustomerId] = useState(initialCustomerId)
   const [cycleInfo, setCycleInfo] = useState<{ cycleNumber: number; nextLoanId: string }>({ cycleNumber: 1, nextLoanId: 'PPRA0001' })
+  const [coApplicantUid, setCoApplicantUid] = useState('')
+  const [loanFormError, setLoanFormError] = useState<string | null>(null)
 
   // Micro Finance Selected Config
   const [mfSelection, setMfSelection] = useState<MicroFinanceProduct>(STANDARD_MICRO_FINANCE_PRODUCTS[2]) // ₹15,000 / 25w / ₹750
@@ -58,13 +72,12 @@ export default function LoanForm() {
   const [firstDate, setFirstDate] = useState('')
   const [collectionDay, setCollectionDay] = useState('Monday')
 
-  // Field Evidence & Location
+  // Field Evidence & Location (URL / Links only - file uploads disabled)
   const [gpsLocation, setGpsLocation] = useState('')
   const [gpsLoading, setGpsLoading] = useState(false)
-  const [disbursementPhoto, setDisbursementPhoto] = useState<File | null>(null)
-  const [disbursementPhotoPreview, setDisbursementPhotoPreview] = useState<string | null>(null)
-  const [coApplicantPhoto, setCoApplicantPhoto] = useState<File | null>(null)
-  const [propertyPhoto, setPropertyPhoto] = useState<File | null>(null)
+  const [disbursementPhotoUrl, setDisbursementPhotoUrl] = useState('')
+  const [coApplicantPhotoUrl, setCoApplicantPhotoUrl] = useState('')
+  const [propertyPhotoUrl, setPropertyPhotoUrl] = useState('')
 
   // Fetch customers for the dropdown
   const { data: customers } = useQuery({
@@ -102,14 +115,6 @@ export default function LoanForm() {
     }
   }, [customerId])
 
-  // Handle Photo changes
-  const handleDisbursementPhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) {
-      setDisbursementPhoto(file)
-      setDisbursementPhotoPreview(URL.createObjectURL(file))
-    }
-  }
 
   // Geolocation
   const handleCaptureGPS = () => {
@@ -138,25 +143,82 @@ export default function LoanForm() {
       ? mfSelection.amount
       : parseFloat(customAmount) || 0
 
+  // For Micro Finance: tenure is in weeks.
+  // For LAP: tenure is in months (e.g. 20 months). We store 20, NOT 20 * 4.33!
+  // For Monthly Interest: tenure is in months (e.g. 12 months).
   const tenureWeeks =
     productType === 'Micro Finance'
       ? mfSelection.tenure
-      : Math.round((parseInt(customTenureMonths) || 12) * 4.33)
+      : parseInt(customTenureMonths) || 12
 
   const emiAmount =
     productType === 'Micro Finance'
       ? mfSelection.ewi
       : productType === 'LAP'
       ? Math.round((principalAmount / (parseInt(customTenureMonths) || 12)) + (principalAmount * (parseFloat(customInterest) / 100)))
+      : monthlyRepaymentMode === 'Bullet'
+      ? 0
       : Math.round(principalAmount * (parseFloat(customInterest) / 100))
 
-  const processingFee = calculateProcessingFee(productType, principalAmount, cycleInfo.cycleNumber > 1)
+  const processingFee = calculateProcessingFee(
+    productType,
+    principalAmount,
+    cycleInfo.cycleNumber > 1,
+    monthlyRepaymentMode
+  )
 
   // Submit Mutation
   const createLoan = useMutation({
     mutationFn: async () => {
+      setLoanFormError(null)
       if (!customerId) throw new Error('Please select a customer.')
       if (!principalAmount || principalAmount <= 0) throw new Error('Invalid loan amount.')
+
+      // 1. Client & Nominee Age Checks (Client max 60, Nominee max 65)
+      if (selectedCustomerObj?.dob) {
+        const clientAge = calculateAge(selectedCustomerObj.dob)
+        if (clientAge > 60) {
+          throw new Error(`Customer age is ${clientAge} years. Client age must not exceed 60 years at loan entry.`)
+        }
+      }
+      if (selectedCustomerObj?.nominee_dob) {
+        const nomineeAge = calculateAge(selectedCustomerObj.nominee_dob)
+        if (nomineeAge > 65) {
+          throw new Error(`Nominee age is ${nomineeAge} years. Nominee age must not exceed 65 years.`)
+        }
+      }
+
+      // 2. Co-Applicant Active Loan Validation (1 active loan per Co-Applicant UID)
+      if (productType === 'LAP' && coApplicantUid.trim()) {
+        const { data: existingCoAppLoans } = await supabase
+          .from('loans')
+          .select('id, loan_id')
+          .eq('status', 'Active')
+          .eq('co_applicant_uid', coApplicantUid.trim())
+          .limit(1)
+
+        if (existingCoAppLoans && existingCoAppLoans.length > 0) {
+          throw new Error(
+            `Co-Applicant UID "${coApplicantUid}" is already linked to active loan ${existingCoAppLoans[0].loan_id}. A co-applicant UID can be linked to only one active loan.`
+          )
+        }
+      }
+
+      // 3. Duplicate Loan Prevention
+      const { data: activeLoansForCust } = await supabase
+        .from('loans')
+        .select('id, loan_id, principal_amount, status, loan_products(type)')
+        .eq('customer_id', customerId)
+        .eq('status', 'Active')
+
+      if (activeLoansForCust && activeLoansForCust.length > 0) {
+        const activeMfi = activeLoansForCust.find((l: any) => l.loan_products?.type === 'Micro Finance')
+        if (productType === 'Micro Finance' && activeMfi) {
+          throw new Error(
+            `Duplicate Loan Warning: Customer already has active Micro Finance loan (${activeMfi.loan_id}). Multiple active Micro Finance loans are restricted per customer.`
+          )
+        }
+      }
 
       // Find matching loan product or default
       const matchedProduct = dbProducts?.find(p => p.type === productType)
@@ -172,7 +234,14 @@ export default function LoanForm() {
           principal_amount: principalAmount,
           tenure_weeks: tenureWeeks,
           emi_amount: emiAmount,
-          first_emi_date: firstDate || null,
+          first_emi_date: (productType === 'Monthly Interest' && monthlyRepaymentMode === 'Bullet') ? null : (firstDate || null),
+          processing_fee: processingFee,
+          collection_day: productType === 'Micro Finance' ? collectionDay : null,
+          gps_location: gpsLocation || null,
+          co_applicant_uid: coApplicantUid.trim() || null,
+          co_applicant_photo_url: productType === 'LAP' ? (coApplicantPhotoUrl.trim() || null) : null,
+          property_photo_url: productType === 'LAP' ? (propertyPhotoUrl.trim() || null) : null,
+          disbursement_photo_url: disbursementPhotoUrl.trim() || null,
           status: 'Pending Approval' // Maker-Checker gate
         })
         .select()
@@ -186,11 +255,14 @@ export default function LoanForm() {
       queryClient.invalidateQueries({ queryKey: ['pending-disbursements'] })
       router.push('/loans')
     },
-    onError: (err: any) => alert(`Failed to submit loan: ${err.message}`)
+    onError: (err: any) => {
+      setLoanFormError(err.message || 'Failed to submit loan')
+    }
   })
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    setLoanFormError(null)
     createLoan.mutate()
   }
 
@@ -219,6 +291,17 @@ export default function LoanForm() {
           </div>
 
       <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Form Error Banner */}
+        {loanFormError && (
+          <div className="bg-rose-50 border-2 border-rose-300 text-rose-800 p-4 rounded-xl flex items-start space-x-3 text-xs font-semibold animate-in fade-in duration-200">
+            <X size={18} className="text-rose-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold text-sm text-rose-900 mb-0.5">Disbursement Validation Alert</p>
+              <p>{loanFormError}</p>
+            </div>
+          </div>
+        )}
+
         {/* Step 1: Customer Selection */}
         <section className="bg-white p-6 rounded-xl border border-slate-200 shadow-xs">
           <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-2">
@@ -372,31 +455,52 @@ export default function LoanForm() {
                 />
               </div>
 
+              <div className="sm:col-span-2 md:col-span-4">
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Co-Applicant UID / Aadhaar Number <span className="text-[10px] text-indigo-600 font-mono">(Can be linked to max 1 active loan)</span>
+                </label>
+                <input
+                  type="text"
+                  value={coApplicantUid}
+                  onChange={e => setCoApplicantUid(e.target.value)}
+                  placeholder="e.g. 1234 5678 9012"
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-600 font-mono"
+                />
+              </div>
+
               <div className="sm:col-span-2 md:col-span-4 text-xs text-slate-500 bg-amber-50 p-2.5 rounded border border-amber-200">
-                ⚠️ <strong>LAP Business Rules:</strong> Delay beyond 3 days incurs 2% interest on delayed days. Foreclosure charge: 2%. Processing fee: 2.5%.
+                ⚠️ <strong>LAP Business Rules:</strong> Monthly collection only. Interest starts from disbursement date. Delay beyond 3 days incurs 2% interest on delayed days. Foreclosure charge: 2%. Processing fee: 2.5%.
               </div>
 
-              {/* LAP Evidence: Co-Applicant & Property Photos */}
+              {/* LAP Evidence: Co-Applicant & Property Photo Links (Uploads Disabled) */}
               <div className="sm:col-span-2 md:col-span-2">
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Co-Applicant Photograph *</label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Co-Applicant Photo Link / URL</label>
                 <input
-                  type="file"
-                  accept="image/*"
-                  onChange={e => setCoApplicantPhoto(e.target.files?.[0] || null)}
-                  className="w-full text-xs border border-slate-300 rounded p-1.5 bg-white"
+                  type="url"
+                  value={coApplicantPhotoUrl}
+                  onChange={e => setCoApplicantPhotoUrl(e.target.value)}
+                  placeholder="https://... (Google Drive or cloud photo link)"
+                  className="w-full text-xs border border-slate-300 rounded-lg p-2 bg-white outline-none focus:border-indigo-600 font-mono"
                 />
-                {coApplicantPhoto && <p className="text-[10px] text-emerald-600 mt-1">✓ {coApplicantPhoto.name}</p>}
+                <p className="text-[10px] text-slate-400 mt-1">Uploads disabled. Enter external photo URL or Drive link.</p>
+                {coApplicantPhotoUrl.trim() && (
+                  <p className="text-[10px] text-emerald-600 mt-0.5 truncate font-medium">✓ Linked: {coApplicantPhotoUrl}</p>
+                )}
               </div>
 
               <div className="sm:col-span-2 md:col-span-2">
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Property Photograph & Title Proof *</label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Property Photo & Title Proof Link / URL</label>
                 <input
-                  type="file"
-                  accept="image/*"
-                  onChange={e => setPropertyPhoto(e.target.files?.[0] || null)}
-                  className="w-full text-xs border border-slate-300 rounded p-1.5 bg-white"
+                  type="url"
+                  value={propertyPhotoUrl}
+                  onChange={e => setPropertyPhotoUrl(e.target.value)}
+                  placeholder="https://... (Drive link for property photo/docs)"
+                  className="w-full text-xs border border-slate-300 rounded-lg p-2 bg-white outline-none focus:border-indigo-600 font-mono"
                 />
-                {propertyPhoto && <p className="text-[10px] text-emerald-600 mt-1">✓ {propertyPhoto.name}</p>}
+                <p className="text-[10px] text-slate-400 mt-1">Uploads disabled. Enter external document URL or Drive link.</p>
+                {propertyPhotoUrl.trim() && (
+                  <p className="text-[10px] text-emerald-600 mt-0.5 truncate font-medium">✓ Linked: {propertyPhotoUrl}</p>
+                )}
               </div>
             </div>
           )}
@@ -438,33 +542,41 @@ export default function LoanForm() {
                   isSearchable={false}
                 />
               </div>
+
+              <div className="sm:col-span-3 text-xs text-slate-500 bg-purple-50 p-2.5 rounded border border-purple-200">
+                ℹ️ <strong>Bullet / Monthly Interest Policy:</strong> No first EMI date or processing fee. Interest generated from disbursement date; interest automatically recalculates on remaining principal upon part-payment.
+              </div>
             </div>
           )}
 
           {/* Schedule & Collection Dates */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4 pt-4 border-t border-slate-100">
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Expected First Due / EMI Date *</label>
-              <input
-                type="date"
-                required
-                value={firstDate}
-                onChange={e => setFirstDate(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-600"
-              />
-            </div>
+          {(productType !== 'Monthly Interest' || monthlyRepaymentMode !== 'Bullet') && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4 pt-4 border-t border-slate-100">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Expected First Due / EMI Date *</label>
+                <input
+                  type="date"
+                  required
+                  value={firstDate}
+                  onChange={e => setFirstDate(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-600"
+                />
+              </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Center Collection Meeting Day</label>
-              <Select
-                value={MEETING_DAY_OPTIONS.find(o => o.value === collectionDay)}
-                options={MEETING_DAY_OPTIONS}
-                onChange={(opt) => setCollectionDay(opt?.value || 'Monday')}
-                styles={customSelectStyles}
-                isSearchable={false}
-              />
+              {productType === 'Micro Finance' && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Center Collection Meeting Day</label>
+                  <Select
+                    value={MEETING_DAY_OPTIONS.find(o => o.value === collectionDay)}
+                    options={MEETING_DAY_OPTIONS}
+                    onChange={(opt) => setCollectionDay(opt?.value || 'Monday')}
+                    styles={customSelectStyles}
+                    isSearchable={false}
+                  />
+                </div>
+              )}
             </div>
-          </div>
+          )}
         </section>
 
         {/* Step 3: Financial Summary Card */}
@@ -477,16 +589,20 @@ export default function LoanForm() {
             <div>
               <span className="text-[10px] uppercase font-bold text-slate-500">Tenure</span>
               <p className="text-lg font-black text-slate-800">
-                {productType === 'Micro Finance' ? `${tenureWeeks} Wks` : `${customTenureMonths || 12} Mos`}
+                {productType === 'Micro Finance' ? `${tenureWeeks} Weeks` : `${customTenureMonths || 12} Months`}
               </p>
             </div>
             <div>
               <span className="text-[10px] uppercase font-bold text-slate-500">Installment ({productType === 'Micro Finance' ? 'EWI' : 'EMI'})</span>
-              <p className="text-lg font-black text-indigo-700">₹{emiAmount.toLocaleString()}</p>
+              <p className="text-lg font-black text-indigo-700">
+                {productType === 'Monthly Interest' && monthlyRepaymentMode === 'Bullet' ? '₹0 (Bullet Maturity)' : `₹${emiAmount.toLocaleString()}`}
+              </p>
             </div>
             <div>
               <span className="text-[10px] uppercase font-bold text-slate-500">Processing Fee</span>
-              <p className="text-lg font-black text-slate-700">₹{processingFee.toLocaleString()}</p>
+              <p className="text-lg font-black text-slate-700">
+                {processingFee > 0 ? `₹${processingFee.toLocaleString()} (${productType === 'Micro Finance' ? (cycleInfo.cycleNumber > 1 ? '2.5% Subsequent' : '3% 1st Cycle') : '2.5%'})` : '₹0 (0% Excluded)'}
+              </p>
             </div>
           </div>
         </section>
@@ -496,29 +612,44 @@ export default function LoanForm() {
           <h2 className="text-base font-bold text-slate-800 mb-4 border-b border-slate-100 pb-2">3. Field Evidence & GPS Stamp</h2>
           
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-            {/* Disbursement Photo */}
+            {/* Disbursement Photo Link */}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Disbursement Photo (Customer + Cash/Agent) *
+                Disbursement Photo Link / URL (Customer + Cash/Agent)
               </label>
-              <div className="border-2 border-dashed border-slate-300 rounded-xl p-4 flex flex-col items-center justify-center text-center hover:bg-slate-50 transition-colors cursor-pointer bg-slate-50 relative overflow-hidden group min-h-[140px]">
+              <div className="space-y-2">
                 <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleDisbursementPhotoChange}
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                  type="url"
+                  value={disbursementPhotoUrl}
+                  onChange={e => setDisbursementPhotoUrl(e.target.value)}
+                  placeholder="https://... (Google Drive or cloud photo link)"
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 font-mono"
                 />
-                {disbursementPhotoPreview ? (
-                  <div className="flex flex-col items-center text-emerald-600">
-                    <img src={disbursementPhotoPreview} alt="Proof" className="w-16 h-16 object-cover rounded-md mb-1 border border-emerald-400" />
-                    <span className="text-xs font-medium truncate max-w-[180px]">{disbursementPhoto?.name}</span>
+                <p className="text-[10px] text-slate-500">
+                  Provide photo link (Drive, cloud, or URL). Direct uploads are blocked to eliminate storage limits.
+                </p>
+                {disbursementPhotoUrl.trim() && (
+                  <div className="flex items-center space-x-2.5 p-2 bg-slate-50 border border-slate-200 rounded-lg">
+                    <img
+                      src={disbursementPhotoUrl}
+                      alt="Disbursement Proof"
+                      className="w-10 h-10 object-cover rounded border border-slate-300 shrink-0"
+                      onError={(e) => {
+                        (e.target as HTMLElement).style.display = 'none'
+                      }}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <span className="text-[11px] font-semibold text-emerald-700 block">Disbursement Link Linked</span>
+                      <a
+                        href={disbursementPhotoUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[10px] text-indigo-600 hover:underline truncate block"
+                      >
+                        {disbursementPhotoUrl}
+                      </a>
+                    </div>
                   </div>
-                ) : (
-                  <>
-                    <Camera size={28} className="text-slate-400 mb-1.5 group-hover:text-indigo-600 transition-colors" />
-                    <span className="text-xs font-semibold text-slate-700">Take Disbursement Photo</span>
-                    <span className="text-[10px] text-slate-400 mt-0.5">Camera or upload</span>
-                  </>
                 )}
               </div>
             </div>

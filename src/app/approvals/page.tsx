@@ -17,6 +17,7 @@ export default function Approvals() {
   const [rejectModalOpen, setRejectModalOpen] = useState(false)
   const [selectedDisbursement, setSelectedDisbursement] = useState<any | null>(null)
   const [selectedCollection, setSelectedCollection] = useState<any | null>(null)
+  const [postApprovalReceipt, setPostApprovalReceipt] = useState<any | null>(null)
   
   // Action form states
   const [rejectionReason, setRejectionReason] = useState('')
@@ -78,12 +79,15 @@ export default function Approvals() {
       const { error } = await supabase.from('collections').update(payload).eq('id', id)
       if (error) throw error
     },
-    onSuccess: () => {
+    onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['pending-collections'] })
       queryClient.invalidateQueries({ queryKey: ['collections'] })
       setRejectModalOpen(false)
       setInspectModalOpen(false)
       setRejectionReason('')
+      if (variables.status === 'Approved' && selectedCollection?.customers?.mobile_number) {
+        setPostApprovalReceipt(selectedCollection)
+      }
       setSelectedCollection(null)
     }
   })
@@ -612,6 +616,35 @@ export default function Approvals() {
                   <span className="font-mono text-[11px]">Field Location: {selectedDisbursement.customers?.gps_location}</span>
                 </div>
               )}
+
+              {/* Field Evidence Photo & Document Links */}
+              {(selectedDisbursement.customers?.photo_url || selectedDisbursement.disbursement_photo_url || selectedDisbursement.co_applicant_photo_url || selectedDisbursement.property_photo_url) && (
+                <div className="col-span-2 pt-2 border-t border-slate-200">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Attached Photo & Proof Links</span>
+                  <div className="flex flex-wrap gap-2 text-[11px]">
+                    {selectedDisbursement.customers?.photo_url && (
+                      <a href={selectedDisbursement.customers.photo_url} target="_blank" rel="noreferrer" className="inline-flex items-center text-indigo-700 bg-indigo-50 border border-indigo-200 px-2.5 py-1 rounded-md hover:bg-indigo-100 font-medium">
+                        📸 Customer Photo Link ↗
+                      </a>
+                    )}
+                    {selectedDisbursement.disbursement_photo_url && (
+                      <a href={selectedDisbursement.disbursement_photo_url} target="_blank" rel="noreferrer" className="inline-flex items-center text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-md hover:bg-emerald-100 font-medium">
+                        🤝 Disbursement Proof Link ↗
+                      </a>
+                    )}
+                    {selectedDisbursement.co_applicant_photo_url && (
+                      <a href={selectedDisbursement.co_applicant_photo_url} target="_blank" rel="noreferrer" className="inline-flex items-center text-purple-700 bg-purple-50 border border-purple-200 px-2.5 py-1 rounded-md hover:bg-purple-100 font-medium">
+                        👤 Co-Applicant Photo Link ↗
+                      </a>
+                    )}
+                    {selectedDisbursement.property_photo_url && (
+                      <a href={selectedDisbursement.property_photo_url} target="_blank" rel="noreferrer" className="inline-flex items-center text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-md hover:bg-amber-100 font-medium">
+                        🏠 Property Photo Link ↗
+                      </a>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Financial Terms */}
@@ -815,6 +848,56 @@ export default function Approvals() {
                 className="bg-rose-600 hover:bg-rose-700 text-white px-5 py-2 rounded-lg text-xs font-bold"
               >
                 Confirm Rejection
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* WhatsApp Post-Collection Approval Confirmation Modal */}
+      {postApprovalReceipt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-emerald-200 text-center animate-in fade-in zoom-in-95 duration-150">
+            <div className="h-14 w-14 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-3">
+              <MessageSquare size={30} />
+            </div>
+            <h3 className="text-lg font-black text-slate-900">Collection Approved!</h3>
+            <p className="text-xs text-slate-600 mt-1">
+              Send an instant WhatsApp payment confirmation receipt to{' '}
+              <strong>{postApprovalReceipt.customers?.full_name}</strong> ({postApprovalReceipt.customers?.mobile_number}).
+            </p>
+
+            <div className="mt-5 space-y-2">
+              <a
+                href={getWhatsAppClickToChatUrl(
+                  postApprovalReceipt.customers.mobile_number,
+                  formatPostCollectionMessage({
+                    customerName: postApprovalReceipt.customers.full_name,
+                    mobileNumber: postApprovalReceipt.customers.mobile_number,
+                    loanId: postApprovalReceipt.loans?.loan_id || 'N/A',
+                    voucherNumber: postApprovalReceipt.voucher_number || postApprovalReceipt.id.slice(0, 8).toUpperCase(),
+                    amountPaid: postApprovalReceipt.amount,
+                    paymentDate: new Date().toISOString().split('T')[0],
+                    paymentMode: postApprovalReceipt.payment_mode,
+                    utrNumber: postApprovalReceipt.utr_number,
+                    remainingOutstanding: Math.max(0, (postApprovalReceipt.loans?.principal_amount || 0) - postApprovalReceipt.amount)
+                  })
+                )}
+                target="_blank"
+                rel="noreferrer"
+                onClick={() => setPostApprovalReceipt(null)}
+                className="w-full inline-flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 rounded-xl text-xs transition-colors shadow-xs"
+              >
+                <MessageSquare size={16} className="mr-2" />
+                Send WhatsApp Confirmation Receipt Now
+              </a>
+
+              <button
+                type="button"
+                onClick={() => setPostApprovalReceipt(null)}
+                className="w-full py-2 text-xs font-semibold text-slate-500 hover:bg-slate-100 rounded-xl transition-colors"
+              >
+                Skip & Close
               </button>
             </div>
           </div>

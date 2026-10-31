@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from 'react'
-import { Key, Shield, Smartphone } from 'lucide-react'
+import Link from 'next/link'
+import { Key, Shield, Smartphone, FileSpreadsheet } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { SettingsHeader } from '@/components/ui/SettingsHeader'
 
@@ -96,6 +97,25 @@ export default function SecuritySettings() {
                 </button>
               </div>
             </form>
+          </section>
+
+          {/* Data Backup & Master Excel Export */}
+          <section className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-center space-x-4">
+              <div className="h-10 w-10 bg-emerald-50 rounded-lg flex items-center justify-center text-emerald-600 shrink-0">
+                <FileSpreadsheet size={20} />
+              </div>
+              <div>
+                <h2 className="text-base font-semibold text-slate-800">Master Database Backup &amp; Excel Export</h2>
+                <p className="text-xs text-slate-500">Download complete system database (Customers, Loans, Collections) in Excel format.</p>
+              </div>
+            </div>
+            <Link
+              href="/settings/backup"
+              className="inline-flex items-center justify-center px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition-colors shadow-xs shrink-0"
+            >
+              Open Master Export ↗
+            </Link>
           </section>
 
           {/* Session Management Placeholder */}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useMemo } from 'react'
+import Link from 'next/link'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { supabase } from '@/lib/supabase'
 import {
@@ -14,7 +15,8 @@ import {
   FileSpreadsheet,
   Save,
   RefreshCw,
-  DollarSign
+  DollarSign,
+  X
 } from 'lucide-react'
 import { calculateBranchDailyReconciliation, BranchDailyFinancialPosition } from '@/lib/cashManagement'
 import { exportToCSV } from '@/lib/exporter'
@@ -23,14 +25,17 @@ export default function BranchCashManagement() {
   const queryClient = useQueryClient()
   const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split('T')[0])
   const [selectedBranchId, setSelectedBranchId] = useState('')
+  const [dayEndBlockedModal, setDayEndBlockedModal] = useState(false)
+  const [dayEndSuccessModal, setDayEndSuccessModal] = useState(false)
+  const [dayEndClosed, setDayEndClosed] = useState(false)
 
-  // Manual/Operational Inputs
-  const [openingCash, setOpeningCash] = useState<number>(25000)
-  const [branchExpenses, setBranchExpenses] = useState<number>(1200)
+  // Manual/Operational Inputs (Initialized to 0 - loaded dynamically from database)
+  const [openingCash, setOpeningCash] = useState<number>(0)
+  const [branchExpenses, setBranchExpenses] = useState<number>(0)
   const [otherReceipts, setOtherReceipts] = useState<number>(0)
   const [otherPayments, setOtherPayments] = useState<number>(0)
   const [staffHandover, setStaffHandover] = useState<number>(0)
-  const [hoHandover, setHoHandover] = useState<number>(15000)
+  const [hoHandover, setHoHandover] = useState<number>(0)
   const [physicalCashCounted, setPhysicalCashCounted] = useState<number>(0)
 
   // Fetch Branches
@@ -42,7 +47,40 @@ export default function BranchCashManagement() {
     }
   })
 
-  // Fetch Collections for the selected date
+  // Fetch existing recorded daily cash desk record from database for this branch & date
+  const { data: existingCashRecord } = useQuery({
+    queryKey: ['existing-cash-record', selectedDate, selectedBranchId],
+    queryFn: async () => {
+      const bId = selectedBranchId || branches?.[0]?.id
+      if (!bId) return null
+      const { data } = await supabase
+        .from('branch_cash_daily')
+        .select('*')
+        .eq('branch_id', bId)
+        .eq('record_date', selectedDate)
+        .maybeSingle()
+      return data || null
+    },
+    enabled: !!selectedDate
+  })
+
+  // Sync inputs from database record when loaded
+  useMemo(() => {
+    if (existingCashRecord) {
+      setOpeningCash(existingCashRecord.opening_cash || 0)
+      setBranchExpenses(existingCashRecord.branch_expenses || 0)
+      setOtherReceipts(existingCashRecord.other_receipts || 0)
+      setOtherPayments(existingCashRecord.other_payments || 0)
+      setStaffHandover(existingCashRecord.staff_handover || 0)
+      setHoHandover(existingCashRecord.ho_handover || 0)
+      setPhysicalCashCounted(existingCashRecord.physical_cash_counted || 0)
+      setDayEndClosed(existingCashRecord.status === 'Reconciled')
+    } else {
+      setDayEndClosed(false)
+    }
+  }, [existingCashRecord])
+
+  // Fetch Collections for the selected date from database
   const { data: dayCollections } = useQuery({
     queryKey: ['day-collections', selectedDate],
     queryFn: async () => {
@@ -50,11 +88,27 @@ export default function BranchCashManagement() {
         .from('collections')
         .select('*')
         .eq('status', 'Approved')
+        .gte('created_at', `${selectedDate}T00:00:00`)
+        .lte('created_at', `${selectedDate}T23:59:59`)
       return data || []
     }
   })
 
-  // Fetch Disbursements for the selected date
+  // Check for pending collections for the day (Must be approved or rejected before Day-End closure)
+  const { data: pendingCollections } = useQuery({
+    queryKey: ['day-pending-collections', selectedDate],
+    queryFn: async () => {
+      const { data } = await supabase
+        .from('collections')
+        .select('id, amount, status, voucher_number, customers(full_name, client_id)')
+        .eq('status', 'Pending Approval')
+        .gte('created_at', `${selectedDate}T00:00:00`)
+        .lte('created_at', `${selectedDate}T23:59:59`)
+      return data || []
+    }
+  })
+
+  // Fetch Disbursements for the selected date from database
   const { data: dayDisbursements } = useQuery({
     queryKey: ['day-disbursements', selectedDate],
     queryFn: async () => {
@@ -62,16 +116,17 @@ export default function BranchCashManagement() {
         .from('loans')
         .select('*')
         .eq('status', 'Active')
+        .or(`disbursement_date.eq.${selectedDate},created_at.gte.${selectedDate}T00:00:00`)
       return data || []
     }
   })
 
-  // Calculate Automated Totals
+  // Calculate Automated Totals from actual database rows
   const cashCollections = useMemo(() => {
     return (
       dayCollections
         ?.filter(c => c.payment_mode === 'Cash')
-        .reduce((sum, c) => sum + c.amount, 0) || 0
+        .reduce((sum, c) => sum + (c.amount || 0), 0) || 0
     )
   }, [dayCollections])
 
@@ -79,17 +134,17 @@ export default function BranchCashManagement() {
     return (
       dayCollections
         ?.filter(c => c.payment_mode !== 'Cash')
-        .reduce((sum, c) => sum + c.amount, 0) || 0
+        .reduce((sum, c) => sum + (c.amount || 0), 0) || 0
     )
   }, [dayCollections])
 
   const disbursementsPaid = useMemo(() => {
     return (
       dayDisbursements
-        ?.slice(0, 2) // Represent daily approved disbursements
+        ?.filter(l => l.disbursement_date === selectedDate || l.created_at?.startsWith(selectedDate))
         .reduce((sum, l) => sum + (l.principal_amount || 0), 0) || 0
     )
-  }, [dayDisbursements])
+  }, [dayDisbursements, selectedDate])
 
   // Compute 10-Point Reconciliation
   const financialPosition: BranchDailyFinancialPosition = {
@@ -345,15 +400,123 @@ export default function BranchCashManagement() {
 
               <button
                 type="button"
-                onClick={() => alert('Daily branch cash reconciliation signed off and recorded in audit log.')}
-                className="w-full bg-slate-900 hover:bg-black text-white py-2.5 rounded-lg text-xs font-bold transition-all shadow-xs"
+                onClick={async () => {
+                  if (pendingCollections && pendingCollections.length > 0) {
+                    setDayEndBlockedModal(true)
+                    return
+                  }
+                  try {
+                    const branchId = selectedBranchId || branches?.[0]?.id || null
+                    if (branchId) {
+                      await supabase
+                        .from('branch_cash_daily')
+                        .upsert({
+                          branch_id: branchId,
+                          record_date: selectedDate,
+                          opening_cash: reconciliation.openingCash,
+                          cash_collections: reconciliation.cashCollections,
+                          digital_collections: reconciliation.digitalCollections,
+                          disbursements_paid: reconciliation.disbursementsPaid,
+                          branch_expenses: reconciliation.branchExpenses,
+                          other_receipts: reconciliation.otherReceipts,
+                          other_payments: reconciliation.otherPayments,
+                          staff_handover: reconciliation.staffHandover,
+                          ho_handover: reconciliation.hoHandover,
+                          closing_cash_system: reconciliation.closingCashSystem,
+                          physical_cash_counted: reconciliation.physicalCashCounted,
+                          difference_amount: reconciliation.differenceAmount,
+                          status: reconciliation.isBalanced ? 'Reconciled' : 'Discrepancy'
+                        }, { onConflict: 'branch_id,record_date' })
+                    }
+                    setDayEndClosed(true)
+                    setDayEndSuccessModal(true)
+                  } catch (e: any) {
+                    alert(`Error recording day end: ${e.message}`)
+                  }
+                }}
+                className={`w-full py-2.5 rounded-lg text-xs font-bold transition-all shadow-xs flex items-center justify-center ${
+                  dayEndClosed
+                    ? 'bg-emerald-600 text-white cursor-default'
+                    : 'bg-slate-900 hover:bg-black text-white'
+                }`}
               >
-                Sign Off & Close Daily Cash Desk
+                {dayEndClosed ? '✓ Daily Cash Desk Closed & Reconciled' : 'Sign Off & Close Daily Cash Desk'}
               </button>
             </div>
           </div>
         </div>
       </div>
+
+      {/* Modal: Blocked Day-End Closure due to Pending Collections */}
+      {dayEndBlockedModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-rose-200 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-start space-x-3 text-rose-600 mb-4">
+              <AlertTriangle size={28} className="shrink-0 mt-0.5" />
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Day-End Closure Blocked</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Daily branch cash collection at the end of the day must close <strong>only after all collection entries are Approved or Rejected</strong>.
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-rose-50 p-3.5 rounded-xl border border-rose-100 text-xs text-rose-800 mb-4">
+              <span className="font-bold">Pending Approval Entries:</span> {pendingCollections?.length || 0} collections are currently awaiting Manager sign-off.
+            </div>
+
+            <div className="max-h-48 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl mb-5 text-xs">
+              {pendingCollections?.map((col: any) => (
+                <div key={col.id} className="p-3 flex justify-between items-center bg-white hover:bg-slate-50">
+                  <div>
+                    <span className="font-bold text-slate-800">{col.customers?.full_name}</span>
+                    <span className="text-[10px] text-slate-400 block font-mono">{col.voucher_number || col.id.slice(0, 8)}</span>
+                  </div>
+                  <span className="font-mono font-bold text-rose-700">₹{col.amount.toLocaleString()}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex items-center justify-end space-x-3">
+              <button
+                type="button"
+                onClick={() => setDayEndBlockedModal(false)}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+              >
+                Close
+              </button>
+              <Link
+                href="/approvals"
+                className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-bold transition-all shadow-xs flex items-center"
+              >
+                Go to Approvals Screen $\rightarrow$
+              </Link>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Day-End Successfully Closed */}
+      {dayEndSuccessModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-emerald-200 text-center animate-in fade-in zoom-in-95 duration-150">
+            <div className="h-14 w-14 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-3">
+              <CheckCircle2 size={32} />
+            </div>
+            <h3 className="text-lg font-black text-slate-900">Branch Cash Desk Closed</h3>
+            <p className="text-xs text-slate-600 mt-1">
+              All collections for {selectedDate} verified. Physical and digital balances have been reconciled and posted to the branch ledger.
+            </p>
+            <button
+              type="button"
+              onClick={() => setDayEndSuccessModal(false)}
+              className="mt-5 w-full bg-slate-900 hover:bg-black text-white py-2 rounded-lg text-xs font-bold transition-all"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

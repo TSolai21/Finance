@@ -19,7 +19,7 @@ import {
   User,
   Calculator
 } from 'lucide-react'
-import { generateWeeklyInstallmentSchedule, calculateLoanDemand } from '@/lib/installments'
+import { generateWeeklyInstallmentSchedule, generateMonthlyInstallmentSchedule, calculateLoanDemand } from '@/lib/installments'
 import { formatPreDemandMessage, getWhatsAppClickToChatUrl } from '@/lib/whatsapp'
 import { recalculateMonthlyInterest, calculateMonthlyLoanClosureAmount, calculateLAPDelayCharge } from '@/lib/products'
 
@@ -76,13 +76,36 @@ export default function LoanDetails() {
 
   // Schedule matrix
   const schedule = useMemo(() => {
-    if (!loan || !loan.first_emi_date || !loan.tenure_weeks || !loan.emi_amount) return []
-    return generateWeeklyInstallmentSchedule(
-      loan.first_emi_date,
-      loan.tenure_weeks,
-      loan.emi_amount,
-      loan.principal_amount
-    )
+    if (!loan) return []
+    const isLap = loan.loan_products?.type === 'LAP'
+    const isMonthly = loan.loan_products?.type === 'Monthly Interest'
+    const startDate = loan.first_emi_date || loan.created_at?.split('T')[0] || new Date().toISOString().split('T')[0]
+    const tenureCount = loan.tenure_weeks || (isLap ? 12 : 25)
+
+    if (isLap) {
+      return generateMonthlyInstallmentSchedule(
+        startDate,
+        tenureCount,
+        loan.emi_amount || Math.round(loan.principal_amount / tenureCount),
+        loan.principal_amount,
+        false
+      )
+    } else if (isMonthly) {
+      return generateMonthlyInstallmentSchedule(
+        startDate,
+        tenureCount,
+        loan.emi_amount || Math.round(loan.principal_amount * 0.025),
+        loan.principal_amount,
+        true
+      )
+    } else {
+      return generateWeeklyInstallmentSchedule(
+        startDate,
+        tenureCount,
+        loan.emi_amount || Math.round(loan.principal_amount / tenureCount),
+        loan.principal_amount
+      )
+    }
   }, [loan])
 
   if (isLoading) return <div className="p-8 text-center text-slate-500">Loading loan account...</div>
@@ -181,13 +204,20 @@ export default function LoanDetails() {
               <span className="text-slate-500 block text-[11px] mt-0.5">{loan.customers?.nominee_relationship || 'Relation'}</span>
             </div>
             <div>
-              <span className="text-slate-400 block text-[10px]">Product & Rate</span>
-              <span className="font-semibold text-slate-800">{loan.loan_products?.name || 'Loan'}</span>
-              <span className="text-slate-500 block text-[11px] mt-0.5">{loan.loan_products?.interest_rate}% Interest</span>
+              <span className="text-slate-400 block text-[10px]">Product</span>
+              <span className="font-semibold text-slate-800">{loan.loan_products?.name || (isLapLoan ? 'LAP Loan' : isMonthlyLoan ? 'Monthly Interest' : 'Micro Finance')}</span>
+              <span className="text-slate-500 block text-[11px] mt-0.5">
+                {isLapLoan ? 'Monthly LAP EMI' : isMonthlyLoan ? 'Monthly Interest / Bullet' : 'Weekly Fixed EWI'}
+              </span>
             </div>
             <div>
-              <span className="text-slate-400 block text-[10px]">First Due Date</span>
-              <span className="font-bold text-indigo-700">{loan.first_emi_date || 'Pending Setup'}</span>
+              <span className="text-slate-400 block text-[10px]">Tenure & Repayment</span>
+              <span className="font-bold text-slate-800">
+                {loan.tenure_weeks} {isLapLoan || isMonthlyLoan ? 'Months' : 'Weeks'} ({schedule.length} EMIs)
+              </span>
+              <span className="text-slate-500 block text-[11px] mt-0.5">
+                {loan.emi_amount ? `₹${loan.emi_amount.toLocaleString()} / ${isLapLoan || isMonthlyLoan ? 'mo' : 'wk'}` : 'Bullet Repayment'}
+              </span>
             </div>
           </div>
         </div>
@@ -258,12 +288,14 @@ export default function LoanDetails() {
         <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
           <div className="px-5 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
             <h3 className="font-bold text-slate-800 text-sm">Passbook Installment Matrix</h3>
-            <span className="text-xs text-slate-500 font-medium">{loan.tenure_weeks ? `${loan.tenure_weeks} Installments` : 'Repayment Schedule'}</span>
+            <span className="text-xs text-slate-500 font-medium">
+              {loan.tenure_weeks ? `${loan.tenure_weeks} ${isLapLoan || isMonthlyLoan ? 'Months' : 'Weeks'} (${schedule.length} Installments)` : 'Repayment Schedule'}
+            </span>
           </div>
 
           {/* Native Mobile Compact Grid (< md) */}
           <div className="p-3 grid grid-cols-1 sm:grid-cols-2 gap-2 md:hidden">
-            {schedule.slice(0, 15).map((inst) => {
+            {schedule.map((inst) => {
               const isPaid = (totalCollected >= inst.installmentNumber * (loan.emi_amount || 0))
               return (
                 <div
@@ -296,9 +328,9 @@ export default function LoanDetails() {
           </div>
 
           {/* Desktop Full Table View (>= md) */}
-          <div className="hidden md:block overflow-x-auto">
+          <div className="hidden md:block overflow-x-auto max-h-[500px]">
             <table className="w-full text-left text-xs">
-              <thead className="bg-slate-50 text-slate-500 uppercase text-[10px] font-bold">
+              <thead className="bg-slate-50 text-slate-500 uppercase text-[10px] font-bold sticky top-0 bg-slate-50/95 backdrop-blur-xs">
                 <tr>
                   <th className="px-4 py-2.5">Inst #</th>
                   <th className="px-4 py-2.5">Due Date</th>
@@ -309,7 +341,7 @@ export default function LoanDetails() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 font-mono">
-                {schedule.slice(0, 15).map((inst) => {
+                {schedule.map((inst) => {
                   const isPaid = (totalCollected >= inst.installmentNumber * (loan.emi_amount || 0))
                   return (
                     <tr key={inst.installmentNumber} className={isPaid ? 'bg-emerald-50/40' : ''}>

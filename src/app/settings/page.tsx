@@ -1,10 +1,11 @@
 "use client";
 
-import { Building, Users, Settings2, ShieldCheck, MessageCircle, Activity, ChevronRight, Lock } from 'lucide-react'
+import { Building, Users, Settings2, ShieldCheck, MessageCircle, Activity, ChevronRight, Lock, FileSpreadsheet } from 'lucide-react'
 import Link from 'next/link'
 
 export default function Settings() {
   const sections = [
+    { title: 'Data Backup & Master Export', desc: 'Download complete system database as multi-sheet Excel.', icon: <FileSpreadsheet size={24} />, href: '/settings/backup', color: 'from-emerald-500 to-teal-700', bg: 'bg-emerald-50', text: 'text-emerald-700' },
     { title: 'Branches & Centers', desc: 'Manage branch hierarchies and center meetings.', icon: <Building size={24} />, href: '/settings/branches', color: 'from-blue-500 to-indigo-600', bg: 'bg-blue-50', text: 'text-blue-600' },
     { title: 'User Roles & Staff', desc: 'Manage permissions and field staff assignments.', icon: <Users size={24} />, href: '/settings/users', color: 'from-emerald-400 to-emerald-600', bg: 'bg-emerald-50', text: 'text-emerald-600' },
     { title: 'Product Configs', desc: 'Update loan terms, EWI structures, and fees.', icon: <Settings2 size={24} />, color: 'from-amber-400 to-orange-500', bg: 'bg-orange-50', text: 'text-orange-600' },
