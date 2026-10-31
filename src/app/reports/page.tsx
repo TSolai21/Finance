@@ -26,6 +26,21 @@ import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
 import { exportToCSV, downloadFullDatabaseAsExcel } from '@/lib/exporter'
 import { formatPreDemandMessage, getWhatsAppClickToChatUrl } from '@/lib/whatsapp'
+import Select from 'react-select'
+import { customSelectStyles } from '@/components/ui/SelectStyles'
+
+const PRODUCT_FILTER_OPTIONS = [
+  { value: 'ALL', label: 'All Products' },
+  { value: 'Micro Finance', label: 'Micro Finance' },
+  { value: 'LAP', label: 'LAP' },
+  { value: 'Monthly Interest', label: 'Monthly Interest' }
+]
+
+const STATUS_FILTER_OPTIONS = [
+  { value: 'ALL', label: 'All Collection Status' },
+  { value: 'Collected', label: 'Collected' },
+  { value: 'Not Collected', label: 'Not Collected' }
+]
 
 type ReportTab =
   | 'portfolio'
@@ -690,27 +705,28 @@ export default function Reports() {
             className="rounded-lg border border-slate-300 px-3 py-1.5 outline-none focus:border-indigo-600 w-full sm:w-72"
           />
 
-          <select
-            value={filterProduct}
-            onChange={e => setFilterProduct(e.target.value)}
-            className="rounded-lg border border-slate-300 px-3 py-1.5 outline-none bg-white font-medium"
-          >
-            <option value="ALL">All Products</option>
-            <option value="Micro Finance">Micro Finance</option>
-            <option value="LAP">LAP</option>
-            <option value="Monthly Interest">Monthly Interest</option>
-          </select>
+          <div className="w-full sm:w-48">
+            <Select
+              value={PRODUCT_FILTER_OPTIONS.find(opt => opt.value === filterProduct)}
+              options={PRODUCT_FILTER_OPTIONS}
+              onChange={(opt) => setFilterProduct(opt?.value || 'ALL')}
+              styles={customSelectStyles}
+              isSearchable={false}
+              placeholder="Select Product"
+            />
+          </div>
 
           {activeTab === 'demand' && (
-            <select
-              value={filterStatus}
-              onChange={e => setFilterStatus(e.target.value)}
-              className="rounded-lg border border-slate-300 px-3 py-1.5 outline-none bg-white font-medium"
-            >
-              <option value="ALL">All Collection Status</option>
-              <option value="Collected">Collected</option>
-              <option value="Not Collected">Not Collected</option>
-            </select>
+            <div className="w-full sm:w-52">
+              <Select
+                value={STATUS_FILTER_OPTIONS.find(opt => opt.value === filterStatus)}
+                options={STATUS_FILTER_OPTIONS}
+                onChange={(opt) => setFilterStatus(opt?.value || 'ALL')}
+                styles={customSelectStyles}
+                isSearchable={false}
+                placeholder="Collection Status"
+              />
+            </div>
           )}
         </div>
       </div>
